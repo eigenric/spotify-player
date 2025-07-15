@@ -959,11 +959,19 @@ fn render_track_table(
     }
 
     let n_tracks = tracks.len();
+    // Buscar el índice de la instancia actual de la canción en reproducción
+    let current_playing_index = if !playing_track_uri.is_empty() {
+        tracks
+            .iter()
+            .position(|t| t.id.uri() == playing_track_uri)
+    } else {
+        None
+    };
     let rows = tracks
         .into_iter()
         .enumerate()
         .map(|(id, t)| {
-            let (id, style) = if playing_track_uri == t.id.uri() {
+            let (id, style) = if Some(id) == current_playing_index {
                 (playing_id.to_string(), ui.theme.current_playing())
             } else {
                 ((id + 1).to_string(), Style::default())
