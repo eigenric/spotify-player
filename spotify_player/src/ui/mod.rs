@@ -9,7 +9,7 @@ use crate::{
 };
 use anyhow::{Context as AnyhowContext, Result};
 use ratatui::{
-    layout::{Constraint, Layout, Rect},
+    layout::{Alignment, Constraint, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::{
@@ -28,7 +28,7 @@ mod page;
 mod playback;
 mod popup;
 pub mod single_line_input;
-mod utils;
+pub mod utils;
 
 /// Run the application UI
 pub fn run(state: &SharedState) -> Result<()> {

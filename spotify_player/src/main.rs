@@ -20,7 +20,7 @@ use std::io::Write;
 
 fn init_spotify(
     client_pub: &flume::Sender<client::ClientRequest>,
-    client: &client::Client,
+    client: &client::AppClient,
     state: &state::SharedState,
 ) -> Result<()> {
     client.initialize_playback(state);
@@ -36,7 +36,12 @@ fn init_spotify(
     Ok(())
 }
 
-fn init_logging(cache_folder: &std::path::Path) -> Result<()> {
+fn init_logging(log_folder: &std::path::Path) -> Result<()> {
+    if std::env::var_os("RUST_LOG").is_some_and(|x| x == "off") {
+        // Don't create log files if logging is disabled.
+        return Ok(());
+    }
+
     let log_prefix = format!(
         "spotify-player-{}",
         chrono::Local::now().format("%y-%m-%d-%H-%M")
@@ -47,7 +52,10 @@ fn init_logging(cache_folder: &std::path::Path) -> Result<()> {
         // default to log the current crate and librespot crates
         std::env::set_var("RUST_LOG", "spotify_player=info,librespot=info");
     }
-    let log_file = std::fs::File::create(cache_folder.join(format!("{log_prefix}.log")))
+    if !log_folder.exists() {
+        std::fs::create_dir_all(log_folder)?;
+    }
+    let log_file = std::fs::File::create(log_folder.join(format!("{log_prefix}.log")))
         .context("failed to create log file")?;
     tracing_subscriber::fmt::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -56,9 +64,8 @@ fn init_logging(cache_folder: &std::path::Path) -> Result<()> {
         .init();
 
     // initialize the application's panic backtrace
-    let backtrace_file =
-        std::fs::File::create(cache_folder.join(format!("{log_prefix}.backtrace")))
-            .context("failed to create backtrace file")?;
+    let backtrace_file = std::fs::File::create(log_folder.join(format!("{log_prefix}.backtrace")))
+        .context("failed to create backtrace file")?;
     let backtrace_file = std::sync::Mutex::new(backtrace_file);
     std::panic::set_hook(Box::new(move |info| {
         let mut file = backtrace_file.lock().unwrap();
@@ -72,8 +79,6 @@ fn init_logging(cache_folder: &std::path::Path) -> Result<()> {
 
 #[tokio::main]
 async fn start_app(state: &state::SharedState) -> Result<()> {
-    let configs = config::get_config();
-
     if !state.is_daemon {
         #[cfg(feature = "image")]
         {
@@ -98,6 +103,7 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
             std::env::set_var("PULSE_PROP_application.icon_name", "spotify");
         }
         if std::env::var("PULSE_PROP_stream.description").is_err() {
+            let configs = config::get_config();
             std::env::set_var(
                 "PULSE_PROP_stream.description",
                 format!(
@@ -115,8 +121,9 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
     }
 
     // create a Spotify API client
-    let auth_config = auth::AuthConfig::new(configs)?;
-    let client = client::Client::new(auth_config);
+    let client = client::AppClient::new()
+        .await
+        .context("construct app client")?;
     client
         .new_session(Some(state), true)
         .await
@@ -125,76 +132,68 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
     // initialize Spotify-related stuff
     init_spotify(&client_pub, &client, state).context("Failed to initialize the Spotify data")?;
 
-    // Spawn application's tasks
-    let mut tasks = Vec::new();
-
     // client socket task (for handling CLI commands)
-    tasks.push(tokio::task::spawn({
+    tokio::task::spawn({
         let client = client.clone();
         let state = state.clone();
         async move {
-            let port = configs.app_config.client_port;
-            tracing::info!("Starting a client socket at 127.0.0.1:{port}");
-            match tokio::net::UdpSocket::bind(("127.0.0.1", port)).await {
-                Ok(socket) => cli::start_socket(client, socket, Some(state)).await,
-                Err(err) => {
-                    tracing::warn!(
-                        "Failed to create a client socket for handling CLI commands: {err:#}"
-                    );
-                }
-            }
+            cli::start_socket(&client, Some(&state)).await;
         }
-    }));
+    });
 
     // client event handler task
-    tasks.push(tokio::task::spawn({
+    tokio::task::spawn({
         let state = state.clone();
         async move {
-            client::start_client_handler(state, client, client_sub).await;
+            client::start_client_handler(&state, &client, &client_sub).await;
         }
-    }));
+    });
 
     // player event watcher task
-    tasks.push(tokio::task::spawn({
-        let state = state.clone();
-        let client_pub = client_pub.clone();
-        async move {
-            client::start_player_event_watchers(state, client_pub).await;
-        }
-    }));
+    std::thread::Builder::new()
+        .name("player-event-watcher".to_string())
+        .spawn({
+            let state = state.clone();
+            let client_pub = client_pub.clone();
+            move || {
+                client::start_player_event_watcher(&state, &client_pub);
+            }
+        })?;
 
     if !state.is_daemon {
-        // spawn tasks needed for running the application UI
-
         // terminal event handler task
-        tokio::task::spawn_blocking({
-            let client_pub = client_pub.clone();
-            let state = state.clone();
-            move || {
-                event::start_event_handler(&state, &client_pub);
-            }
-        });
+        std::thread::Builder::new()
+            .name("terminal-event-handler".to_string())
+            .spawn({
+                let client_pub = client_pub.clone();
+                let state = state.clone();
+                move || {
+                    event::start_event_handler(&state, &client_pub);
+                }
+            })?;
 
         // application UI task
-        tokio::task::spawn_blocking({
+        std::thread::Builder::new().name("ui".to_string()).spawn({
             let state = state.clone();
             move || ui::run(&state)
-        });
+        })?;
     }
 
     #[cfg(feature = "media-control")]
-    if configs.app_config.enable_media_control {
+    if config::get_config().app_config.enable_media_control {
         // media control task
-        tokio::task::spawn_blocking({
-            let state = state.clone();
-            move || {
-                if let Err(err) = media_control::start_event_watcher(&state, client_pub) {
-                    tracing::error!(
-                        "Failed to start the application's media control event watcher: err={err:#?}"
-                    );
+        std::thread::Builder::new()
+            .name("media-control".to_string())
+            .spawn({
+                let state = state.clone();
+                move || {
+                    if let Err(err) = media_control::start_event_watcher(&state, client_pub) {
+                        tracing::error!(
+                            "Failed to start the application's media control event watcher: err={err:#?}"
+                        );
+                    }
                 }
-            }
-        });
+            })?;
 
         // the winit's event loop must be run in the main thread
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -210,11 +209,10 @@ async fn start_app(state: &state::SharedState) -> Result<()> {
         }
     }
 
-    for task in tasks {
-        task.await?;
+    // infinite loop to keep the main thread alive
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
     }
-
-    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -252,6 +250,10 @@ fn main() -> Result<()> {
     // initialize the application configs
     {
         let mut configs = config::Configs::new(&config_folder, &cache_folder)?;
+        if configs.app_config.log_folder.is_none() {
+            // set the log folder to be the cache folder if it is not set
+            configs.app_config.log_folder = Some(cache_folder);
+        }
         if let Some(theme) = args.get_one::<String>("theme") {
             // override the theme config if user specifies a `theme` cli argument
             theme.clone_into(&mut configs.app_config.theme);
@@ -262,7 +264,13 @@ fn main() -> Result<()> {
     match args.subcommand() {
         None => {
             // initialize the application's log
-            init_logging(&cache_folder).context("failed to initialize application's logging")?;
+            let log_folder = config::get_config()
+                .app_config
+                .log_folder
+                .as_deref()
+                .expect("log_folder is set");
+
+            init_logging(log_folder).context("failed to initialize application's logging")?;
 
             // log the application's configurations
             tracing::info!("Configurations: {:?}", config::get_config());

@@ -1,4 +1,3 @@
-use anyhow::{anyhow, Result};
 use librespot_core::session::Session;
 use maybe_async::maybe_async;
 use rspotify::{
@@ -9,23 +8,17 @@ use rspotify::{
 };
 use std::{fmt, sync::Arc};
 
-use crate::{auth::SPOTIFY_CLIENT_ID, config, token};
+use crate::token;
 
 #[derive(Clone, Default)]
-/// A Spotify client to interact with Spotify API server
+/// A custom Spotify client to interact with the official Spotify API server
 pub struct Spotify {
     creds: Credentials,
     oauth: OAuth,
     config: Config,
     token: Arc<Mutex<Option<Token>>>,
     http: HttpClient,
-    /// User-provided client ID
-    ///
-    /// This client ID is mainly used to support Spotify Connect feature
-    /// because Spotify client ID doesn't have access to user available devices
-    /// (<https://developer.spotify.com/documentation/web-api/reference/get-a-users-available-devices>)
-    user_client_id: String,
-    pub(crate) session: Arc<tokio::sync::Mutex<Option<Session>>>,
+    session: Arc<tokio::sync::Mutex<Option<Session>>>,
 }
 
 #[allow(clippy::missing_fields_in_debug)] // Seems like not all fields are necessary in debug
@@ -52,12 +45,12 @@ impl Spotify {
             },
             token: Arc::new(Mutex::new(None)),
             http: HttpClient::default(),
-            user_client_id: config::get_config()
-                .app_config
-                .get_client_id()
-                .expect("get client_id"),
             session: Arc::new(tokio::sync::Mutex::new(None)),
         }
+    }
+
+    pub async fn set_session(&self, session: Session) {
+        *self.session.lock().await = Some(session);
     }
 
     pub async fn session(&self) -> Session {
@@ -66,34 +59,6 @@ impl Spotify {
             .await
             .clone()
             .expect("non-empty Spotify session")
-    }
-
-    /// Get a Spotify access token.
-    /// The function may retrieve a new token and update the current token
-    /// stored inside the client if the old one is expired.
-    pub async fn access_token(&self) -> Result<String> {
-        let should_update = match self.token.lock().await.unwrap().as_ref() {
-            Some(token) => token.is_expired(),
-            None => true,
-        };
-        if should_update {
-            self.refresh_token().await?;
-        }
-
-        match self.token.lock().await.unwrap().as_ref() {
-            Some(token) => Ok(token.access_token.clone()),
-            None => Err(anyhow!(
-                "failed to get the authentication token stored inside the client."
-            )),
-        }
-    }
-
-    /// Get a Spotify access token based on a user-provided client ID
-    // TODO: implement caching
-    pub async fn access_token_from_user_client_id(&self) -> Result<String> {
-        let session = self.session().await;
-        let token = token::get_token_librespot(&session, &self.user_client_id).await?;
-        Ok(token.access_token)
     }
 }
 
@@ -127,7 +92,7 @@ impl BaseClient for Spotify {
             return Ok(old_token);
         }
 
-        match token::get_token_rspotify(&session, SPOTIFY_CLIENT_ID).await {
+        match token::get_token_rspotify(&session).await {
             Ok(token) => Ok(Some(token)),
             Err(err) => {
                 tracing::error!("Failed to get a new token: {err:#}");

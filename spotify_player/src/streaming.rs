@@ -1,9 +1,9 @@
-use crate::{client::Client, config, state::SharedState};
+use crate::{client::AppClient, config, state::SharedState};
 use anyhow::Context;
-use librespot_connect::{config::ConnectConfig, spirc::Spirc};
+use librespot_connect::{ConnectConfig, Spirc};
 use librespot_core::authentication::Credentials;
-use librespot_core::Session;
-use librespot_core::{config::DeviceType, spotify_id};
+use librespot_core::config::DeviceType;
+use librespot_core::{spotify_uri, Session, SpotifyUri};
 use librespot_playback::mixer::MixerConfig;
 use librespot_playback::{
     audio_backend,
@@ -85,17 +85,17 @@ impl PlayerEvent {
     }
 }
 
-fn spotify_id_to_playable_id(id: spotify_id::SpotifyId) -> anyhow::Result<PlayableId<'static>> {
-    match id.item_type {
-        spotify_id::SpotifyItemType::Track => {
-            let uri = id.to_uri()?;
+fn spotify_id_to_playable_id(uri: &spotify_uri::SpotifyUri) -> anyhow::Result<PlayableId<'static>> {
+    match uri {
+        SpotifyUri::Track { .. } => {
+            let uri = uri.to_uri()?;
             Ok(TrackId::from_uri(&uri)?.into_static().into())
         }
-        spotify_id::SpotifyItemType::Episode => {
-            let uri = id.to_uri()?;
+        SpotifyUri::Episode { .. } => {
+            let uri = uri.to_uri()?;
             Ok(EpisodeId::from_uri(&uri)?.into_static().into())
         }
-        _ => anyhow::bail!("unexpected spotify_id {:?}", id),
+        _ => anyhow::bail!("unexpected spotify_id {uri:?}"),
     }
 }
 
@@ -103,14 +103,14 @@ impl PlayerEvent {
     pub fn from_librespot_player_event(e: player::PlayerEvent) -> anyhow::Result<Option<Self>> {
         Ok(match e {
             player::PlayerEvent::TrackChanged { audio_item } => Some(PlayerEvent::Changed {
-                playable_id: spotify_id_to_playable_id(audio_item.track_id)?,
+                playable_id: spotify_id_to_playable_id(&audio_item.track_id)?,
             }),
             player::PlayerEvent::Playing {
                 track_id,
                 position_ms,
                 ..
             } => Some(PlayerEvent::Playing {
-                playable_id: spotify_id_to_playable_id(track_id)?,
+                playable_id: spotify_id_to_playable_id(&track_id)?,
                 position_ms,
             }),
             player::PlayerEvent::Paused {
@@ -118,11 +118,11 @@ impl PlayerEvent {
                 position_ms,
                 ..
             } => Some(PlayerEvent::Paused {
-                playable_id: spotify_id_to_playable_id(track_id)?,
+                playable_id: spotify_id_to_playable_id(&track_id)?,
                 position_ms,
             }),
             player::PlayerEvent::EndOfTrack { track_id, .. } => Some(PlayerEvent::EndOfTrack {
-                playable_id: spotify_id_to_playable_id(track_id)?,
+                playable_id: spotify_id_to_playable_id(&track_id)?,
             }),
             _ => None,
         })
@@ -140,7 +140,7 @@ fn execute_player_event_hook_command(
 
 /// Create a new streaming connection
 pub async fn new_connection(
-    client: Client,
+    client: AppClient,
     state: SharedState,
     session: Session,
     creds: Credentials,
@@ -156,17 +156,20 @@ pub async fn new_connection(
     let connect_config = ConnectConfig {
         name: device.name.clone(),
         device_type: device.device_type.parse::<DeviceType>().unwrap_or_default(),
-        initial_volume: Some(volume),
+        initial_volume: volume,
 
         // non-configurable fields, use default values.
         // We may allow users to configure these fields in a future release
-        has_volume_ctrl: true,
         is_group: false,
+        disable_volume: false,
+        volume_steps: 64,
     };
 
     tracing::info!("Application's connect configurations: {:?}", connect_config);
 
-    let mixer = Arc::new(mixer::softmixer::SoftMixer::open(MixerConfig::default()));
+    let mixer = Arc::new(
+        mixer::softmixer::SoftMixer::open(MixerConfig::default()).context("opening softmixer")?,
+    );
     mixer.set_volume(volume);
 
     let backend = audio_backend::find(None).expect("should be able to find an audio backend");

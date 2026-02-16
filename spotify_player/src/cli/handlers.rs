@@ -1,8 +1,9 @@
 use crate::{auth::AuthConfig, client};
 
 use super::{
-    config, init_cli, start_socket, Command, ContextType, GetRequest, IdOrName, ItemType, Key,
-    PlaylistCommand, PlaylistId, Request, Response, MAX_REQUEST_SIZE,
+    config, init_cli, start_socket, AlbumId, Command, ContextType, EditAction, GetRequest,
+    IdOrName, ItemType, Key, PlaylistCommand, PlaylistId, Request, Response, TrackId,
+    MAX_REQUEST_SIZE,
 };
 use anyhow::{Context, Result};
 use clap::{ArgMatches, Id};
@@ -153,19 +154,17 @@ fn try_connect_to_client(socket: &UdpSocket, configs: &config::Configs) -> Resul
             // no running `spotify_player` instance found,
             // initialize a new client to handle the current CLI command
 
-            let auth_config = AuthConfig::new(configs)?;
             let rt = tokio::runtime::Runtime::new()?;
 
             // create a Spotify API client
-            let client = client::Client::new(auth_config);
+            let client = rt
+                .block_on(client::AppClient::new())
+                .context("construct app client")?;
             rt.block_on(client.new_session(None, false))
                 .context("new session")?;
 
-            // create a client socket for handling CLI commands
-            let client_socket = rt.block_on(tokio::net::UdpSocket::bind(("127.0.0.1", port)))?;
-
             // spawn a thread to handle the CLI request
-            std::thread::spawn(move || rt.block_on(start_socket(client, client_socket, None)));
+            std::thread::spawn(move || rt.block_on(start_socket(&client, None)));
         } else {
             return Err(err.into());
         }
@@ -191,6 +190,10 @@ pub fn handle_cli_subcommand(cmd: &str, args: &ArgMatches) -> Result<()> {
             let mut cmd = init_cli()?;
             let name = cmd.get_name().to_string();
             generate(gen, &mut cmd, name, &mut std::io::stdout());
+            std::process::exit(0);
+        }
+        "features" => {
+            print_features();
             std::process::exit(0);
         }
         _ => {}
@@ -314,8 +317,67 @@ fn handle_playlist_subcommand(args: &ArgMatches) -> Result<Request> {
 
             PlaylistCommand::Sync { id: pid, delete }
         }
+        "edit" => {
+            let playlist_id = PlaylistId::from_id(
+                args.get_one::<String>("playlist_id")
+                    .expect("playlist_id arg is required")
+                    .to_owned(),
+            )?;
+
+            let action = *args
+                .get_one::<EditAction>("action")
+                .expect("action arg is required");
+
+            let track_id = args
+                .get_one::<String>("track_id")
+                .map(|s| TrackId::from_id(s.to_owned()))
+                .transpose()?;
+
+            let album_id = args
+                .get_one::<String>("album_id")
+                .map(|s| AlbumId::from_id(s.to_owned()))
+                .transpose()?;
+
+            PlaylistCommand::Edit {
+                playlist_id,
+                action,
+                track_id,
+                album_id,
+            }
+        }
         _ => unreachable!(),
     };
 
     Ok(Request::Playlist(command))
+}
+
+macro_rules! print_feature {
+    ($feature:literal) => {
+        #[cfg(feature = $feature)]
+        println!("  ✓ {}", $feature);
+        #[cfg(not(feature = $feature))]
+        println!("  ✗ {}", $feature);
+    };
+}
+
+fn print_features() {
+    println!("Compile-time features:");
+
+    print_feature!("daemon");
+    print_feature!("streaming");
+    print_feature!("media-control");
+    print_feature!("image");
+    print_feature!("viuer");
+    print_feature!("sixel");
+    print_feature!("pixelate");
+    print_feature!("notify");
+    print_feature!("fzf");
+
+    // Audio backends
+    print_feature!("pulseaudio-backend");
+    print_feature!("alsa-backend");
+    print_feature!("rodio-backend");
+    print_feature!("jackaudio-backend");
+    print_feature!("sdl-backend");
+    print_feature!("gstreamer-backend");
 }

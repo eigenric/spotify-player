@@ -3,17 +3,20 @@ use std::{
     fmt::Display,
 };
 
+use chrono_humanize::HumanTime;
 use ratatui::text::Line;
 
 use crate::{state::Episode, utils::format_duration};
 
 use super::{
-    config, utils, utils::construct_and_render_block, Album, Artist, ArtistFocusState, Borders,
-    BrowsePageUIState, Cell, Constraint, Context, ContextPageUIState, DataReadGuard, Frame, Id,
-    Layout, LibraryFocusState, MutableWindowState, Orientation, PageState, Paragraph,
-    PlaylistFolderItem, Rect, Row, SearchFocusState, SharedState, Style, Table, Track,
+    config, utils, utils::construct_and_render_block, Album, Alignment, Artist, ArtistFocusState,
+    Borders, BrowsePageUIState, Cell, Constraint, Context, ContextPageUIState, DataReadGuard,
+    Frame, Id, Layout, LibraryFocusState, MutableWindowState, Orientation, PageState, Paragraph,
+    PlaylistFolderItem, Rect, Row, SearchFocusState, SharedState, Style, Table, Text, Track,
     UIStateGuard,
 };
+use crate::state::BidiDisplay;
+use crate::ui::utils::to_bidi_string;
 
 const COMMAND_TABLE_CONSTRAINTS: [Constraint; 3] = [
     Constraint::Percentage(25),
@@ -36,7 +39,10 @@ pub fn render_search_page(
     rect: Rect,
 ) {
     fn search_items<T: Display>(items: &[T]) -> Vec<(String, bool)> {
-        items.iter().map(|i| (i.to_string(), false)).collect()
+        items
+            .iter()
+            .map(|i| (to_bidi_string(&i.to_string()), false))
+            .collect()
     }
 
     // 1. Get data
@@ -273,15 +279,12 @@ pub fn render_context_page(
     );
 
     // 3+4. Construct and render the page's widgets
-    let id = match id {
-        None => {
-            frame.render_widget(
-                Paragraph::new("Cannot determine the current page's context"),
-                rect,
-            );
-            return;
-        }
-        Some(id) => id,
+    let Some(id) = id else {
+        frame.render_widget(
+            Paragraph::new("Cannot determine the current page's context"),
+            rect,
+        );
+        return;
     };
 
     let data = state.data.read();
@@ -289,23 +292,23 @@ pub fn render_context_page(
         Some(context) => {
             // render context description
             let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(0)]).split(rect);
-            let is_followed_string = if let Context::Playlist { playlist, .. } = context {
-                if data.user_data.is_followed_playlist(playlist) {
-                    "Followed"
-                } else {
-                    "Not Followed"
-                }
+
+            let description = if let Context::Playlist { playlist, .. } = context {
+                format!(
+                    "{} | {}",
+                    context.description(),
+                    if data.user_data.is_followed_playlist(playlist) {
+                        "Followed"
+                    } else {
+                        "Not Followed"
+                    }
+                )
             } else {
-                ""
+                context.description()
             };
 
             frame.render_widget(
-                Paragraph::new(format!(
-                    "{} | {}",
-                    context.description(),
-                    is_followed_string
-                ))
-                .style(ui.theme.page_desc()),
+                Paragraph::new(description).style(ui.theme.page_desc()),
                 chunks[0],
             );
             let rect = chunks[1];
@@ -334,8 +337,7 @@ pub fn render_context_page(
                         let chunks = Layout::vertical([Constraint::Length(1), Constraint::Fill(0)])
                             .split(rect);
                         frame.render_widget(
-                            Paragraph::new(playlist.desc.to_string())
-                                .style(ui.theme.playlist_desc()),
+                            Paragraph::new(playlist.desc.clone()).style(ui.theme.playlist_desc()),
                             chunks[0],
                         );
                         chunks[1]
@@ -441,13 +443,13 @@ pub fn render_library_page(
     // 3. Construct the page's widgets
     // Construct the playlist window
     let items = ui
-        .search_filtered_items(&data.user_data.folder_playlists_items(playlist_folder_id))
+        .search_filtered_items(&data.user_data.library_playlist_items(playlist_folder_id))
         .into_iter()
         .map(|item| match item {
             PlaylistFolderItem::Playlist(p) => {
-                (p.to_string(), curr_context_uri == Some(p.id.uri()))
+                (p.to_bidi_string(), curr_context_uri == Some(p.id.uri()))
             }
-            PlaylistFolderItem::Folder(f) => (f.to_string(), false),
+            PlaylistFolderItem::Folder(f) => (f.to_bidi_string(), false),
         })
         .collect::<Vec<_>>();
 
@@ -463,7 +465,7 @@ pub fn render_library_page(
         &ui.theme,
         ui.search_filtered_items(&data.user_data.saved_albums)
             .into_iter()
-            .map(|a| (a.to_string(), curr_context_uri == Some(a.id.uri())))
+            .map(|a| (a.to_bidi_string(), curr_context_uri == Some(a.id.uri())))
             .collect(),
         is_active && focus_state == LibraryFocusState::SavedAlbums,
     );
@@ -472,7 +474,7 @@ pub fn render_library_page(
         &ui.theme,
         ui.search_filtered_items(&data.user_data.followed_artists)
             .into_iter()
-            .map(|a| (a.to_string(), curr_context_uri == Some(a.id.uri())))
+            .map(|a| (a.to_bidi_string(), curr_context_uri == Some(a.id.uri())))
             .collect(),
         is_active && focus_state == LibraryFocusState::FollowedArtists,
     );
@@ -606,8 +608,10 @@ pub fn render_lyrics_page(
 
     // 4. Render the page's widgets
     // render lyric page description text
+    let bidi_track = to_bidi_string(track);
+    let bidi_artists = to_bidi_string(artists);
     frame.render_widget(
-        Paragraph::new(format!("{track} by {artists}")).style(ui.theme.page_desc()),
+        Paragraph::new(format!("{bidi_track} by {bidi_artists}")).style(ui.theme.page_desc()),
         chunks[0],
     );
 
@@ -722,9 +726,9 @@ pub fn render_queue_page(
     fn get_playable_name(item: &PlayableItem) -> String {
         match item {
             PlayableItem::Track(FullTrack { ref name, .. })
-            | PlayableItem::Episode(FullEpisode { ref name, .. }) => name,
+            | PlayableItem::Episode(FullEpisode { ref name, .. }) => name.clone(),
+            PlayableItem::Unknown(_) => String::new(),
         }
-        .to_string()
     }
     fn get_playable_artists(item: &PlayableItem) -> String {
         match item {
@@ -734,12 +738,14 @@ pub fn render_queue_page(
                 .collect::<Vec<_>>()
                 .join(", "),
             PlayableItem::Episode(FullEpisode { ref show, .. }) => show.publisher.clone(),
+            PlayableItem::Unknown(_) => String::new(),
         }
     }
     fn get_playable_duration(item: &PlayableItem) -> String {
         match item {
             PlayableItem::Track(FullTrack { ref duration, .. })
             | PlayableItem::Episode(FullEpisode { ref duration, .. }) => format_duration(duration),
+            PlayableItem::Unknown(_) => String::new(),
         }
     }
 
@@ -958,6 +964,9 @@ fn render_track_table(
         }
     }
 
+    // enable Added column if any track in the table has added_at field specified
+    let added_at_enabled = tracks.iter().any(|t| t.added_at > 0);
+
     let n_tracks = tracks.len();
     // Buscar el índice de la instancia actual de la canción en reproducción
     let current_playing_index = if !playing_track_uri.is_empty() {
@@ -971,10 +980,11 @@ fn render_track_table(
         .into_iter()
         .enumerate()
         .map(|(id, t)| {
-            let (id, style) = if Some(id) == current_playing_index {
+            let track_no = (id + 1).to_string();
+            let (play_pause, style) = if Some(id) == current_playing_index {
                 (playing_id.to_string(), ui.theme.current_playing())
             } else {
-                ((id + 1).to_string(), Style::default())
+                (String::new(), Style::default())
             };
             Row::new(vec![
                 if data.user_data.is_liked_track(t) {
@@ -982,10 +992,24 @@ fn render_track_table(
                 } else {
                     Cell::from("")
                 },
-                Cell::from(id),
-                Cell::from(t.display_name()),
-                Cell::from(t.artists_info()),
-                Cell::from(t.album_info()),
+                Cell::from(Text::from(track_no).alignment(Alignment::Right)),
+                Cell::from(play_pause),
+                Cell::from(to_bidi_string(&t.display_name())),
+                Cell::from(to_bidi_string(&t.artists_info())),
+                Cell::from(to_bidi_string(&t.album_info())),
+                if added_at_enabled {
+                    // added_at is in seconds resolution
+                    let time =
+                        chrono::DateTime::from_timestamp_nanos(t.added_at as i64 * 1_000_000_000);
+                    // use absolute date format if the track is added more than a month ago, otherwise use relative date
+                    Cell::from(if chrono::Utc::now() > time + chrono::Duration::days(30) {
+                        time.format("%b %d, %Y").to_string()
+                    } else {
+                        HumanTime::from(time).to_string()
+                    })
+                } else {
+                    Cell::from("")
+                },
                 Cell::from(format!(
                     "{}:{:02}",
                     t.duration.as_secs() / 60,
@@ -995,24 +1019,46 @@ fn render_track_table(
             .style(style)
         })
         .collect::<Vec<_>>();
+
+    let n_play_pause_chars = std::cmp::max(
+        configs.app_config.play_icon.chars().count(),
+        configs.app_config.pause_icon.chars().count(),
+    ) as u16;
+    let n_track_digits = if n_tracks > 0 {
+        (n_tracks.ilog10() + 1) as u16
+    } else {
+        1
+    };
     let track_table = Table::new(
         rows,
         [
             Constraint::Length(configs.app_config.liked_icon.chars().count() as u16),
-            Constraint::Length(4),
+            Constraint::Length(n_track_digits),
+            Constraint::Length(n_play_pause_chars),
             Constraint::Fill(4),
             Constraint::Fill(3),
             Constraint::Fill(5),
+            if added_at_enabled {
+                Constraint::Fill(2)
+            } else {
+                Constraint::Fill(0)
+            },
             Constraint::Fill(1),
         ],
     )
     .header(
         Row::new(vec![
             Cell::from(""),
-            Cell::from("#"),
+            Cell::from(Text::from("#").alignment(Alignment::Right)),
+            Cell::from(""),
             Cell::from("Title"),
             Cell::from("Artists"),
             Cell::from("Album"),
+            if added_at_enabled {
+                Cell::from("Added")
+            } else {
+                Cell::from("")
+            },
             Cell::from("Duration"),
         ])
         .style(ui.theme.table_header()),
@@ -1075,7 +1121,7 @@ fn render_episode_table(
             };
             Row::new(vec![
                 Cell::from(id),
-                Cell::from(e.name.clone()),
+                Cell::from(to_bidi_string(&e.name)),
                 Cell::from(e.release_date.clone()),
                 Cell::from(format!(
                     "{}:{:02}",
