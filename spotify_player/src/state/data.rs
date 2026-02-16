@@ -183,6 +183,24 @@ impl UserData {
             .collect()
     }
 
+    /// Get playlists items for the library page, filtered by visibility (shown on profile)
+    pub fn library_playlist_items(&self, folder_id: usize) -> Vec<&PlaylistFolderItem> {
+        self.playlists
+            .iter()
+            .filter(|item| match item {
+                PlaylistFolderItem::Playlist(p) => {
+                    if p.current_folder_id != folder_id {
+                        return false;
+                    }
+                    let is_owner = self.user.as_ref().map(|u| u.id == p.owner.1).unwrap_or(true);
+                    let is_public = p.public != Some(false);
+                    is_public && is_owner
+                }
+                PlaylistFolderItem::Folder(f) => f.current_id == folder_id,
+            })
+            .collect()
+    }
+
     /// Check if a track is a liked track
     pub fn is_liked_track(&self, track: &Track) -> bool {
         self.saved_tracks.contains_key(&track.id.uri())

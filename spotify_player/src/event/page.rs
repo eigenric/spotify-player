@@ -59,7 +59,7 @@ fn handle_action_for_library_page(
     match focus_state {
         LibraryFocusState::Playlists => window::handle_action_for_selected_item(
             action,
-            &ui.search_filtered_items(&data.user_data.folder_playlists_items(folder_id))
+            &ui.search_filtered_items(&data.user_data.library_playlist_items(folder_id))
                 .into_iter()
                 .copied()
                 .collect::<Vec<_>>(),
@@ -162,7 +162,7 @@ fn handle_command_for_library_page(
             let data = state.data.read();
             Ok(window::handle_command_for_playlist_list_window(
                 command,
-                &ui.search_filtered_items(&data.user_data.folder_playlists_items(folder_id))
+                &ui.search_filtered_items(&data.user_data.library_playlist_items(folder_id))
                     .into_iter()
                     .copied()
                     .collect::<Vec<_>>(),

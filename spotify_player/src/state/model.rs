@@ -174,6 +174,8 @@ pub struct Playlist {
     #[serde(default)]
     pub current_folder_id: usize,
     pub snapshot_id: String,
+    #[serde(default)]
+    pub public: Option<bool>,
 }
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -552,6 +554,7 @@ impl From<rspotify::model::SimplifiedPlaylist> for Playlist {
             desc: String::new(),
             current_folder_id: 0,
             snapshot_id: playlist.snapshot_id,
+            public: playlist.public,
         }
     }
 }
@@ -574,6 +577,7 @@ impl From<rspotify::model::FullPlaylist> for Playlist {
             desc,
             current_folder_id: 0,
             snapshot_id: playlist.snapshot_id,
+            public: playlist.public,
         }
     }
 }
